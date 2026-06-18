@@ -311,64 +311,34 @@ async def segment_layers(
 ) -> str:
     """
     Predict a retinal layer segmentation map from an OCT B-scan.
-
-    Runs MIRAGE in reconstruction mode and extracts the bscanlayermap output,
-    which assigns each pixel to one of 13 retinal layer classes. The map is
-    returned at MIRAGE's native 128×128 resolution as a flat integer array
-    suitable for further processing or visualization.
-
-    Layer class indices (0–12) follow the MIRAGE/MultiMAE convention:
-        0  Background
-        1  RNFL (Retinal Nerve Fiber Layer)
-        2  GCL+IPL
-        3  INL
-        4  OPL
-        5  ONL
-        6  ELM
-        7  IS/OS
-        8  RPE
-        9  BM
-        10 Choroid
-        11 Vitreous
-        12 Other
-
-    Suitable for:
-        - Automated retinal layer thickness measurement
-        - AMD / DME / glaucoma staging from layer maps
-        - Preprocessing for downstream segmentation pipelines
-
-    Args:
-        bscan_b64:   Base64-encoded grayscale OCT B-scan (PNG or JPEG).
-        image_id:    Identifier for logging / tracing.
-        slo_b64:     Optional SLO image for multimodal conditioning.
-        model_size:  "base" (default) or "large".
-        max_side:    Pre-resize longest edge to this value (default 512).
-
-    Returns:
-        JSON with:
-          layermap         — flat list of 128×128 = 16 384 integer class indices
-          layermap_h/w     — dimensions (128, 128)
-          n_classes        — 13
-          model_size, image_id, image_width, image_height
+ 
+    Runs MIRAGE in reconstruction mode and extracts the bscanlayermap output
+    (13 retinal layer classes, native 128x128, returned as a flat int array).
+    See the original docstring for the full class list and return schema.
     """
     try:
         _validate_model_size(model_size, image_id)
-        bscan_clean, _, _, orig_w, orig_h = _preprocess_grayscale(
+ 
+        # IMPORTANT: capture orig_w/orig_h here. Do NOT collapse this to
+        # `bscan_clean, *_ = ...` — the response below references the originals.
+        bscan_clean, _sent_w, _sent_h, orig_w, orig_h = _preprocess_grayscale(
             bscan_b64, image_id, tag="bscan", max_side=max_side
         )
-
+ 
         payload: dict = {
             "bscan_b64":     bscan_clean,
             "model_size":    model_size,
             "features_only": False,
         }
         if slo_b64:
-            slo_clean, *_ = _preprocess_grayscale(slo_b64, image_id, tag="slo", max_side=max_side)
+            slo_clean, *_ = _preprocess_grayscale(
+                slo_b64, image_id, tag="slo", max_side=max_side
+            )
             payload["slo_b64"] = slo_clean
-
+ 
         result = _modal_dispatch(payload, image_id)
         predictions = result.get("predictions", {})
-
+ 
         if "bscanlayermap" not in predictions:
             return json.dumps({
                 "success":  False,
@@ -376,13 +346,13 @@ async def segment_layers(
                             "Ensure the Modal worker has output adapters enabled.",
                 "image_id": image_id,
             })
-
-        # predictions["bscanlayermap"] is a 2D list (H×W) from the Modal worker
+ 
+        # predictions["bscanlayermap"] is a 2D list (H x W) from the Modal worker
         layermap_2d = predictions["bscanlayermap"]
         h = len(layermap_2d)
         w = len(layermap_2d[0]) if h else 0
         flat = [v for row in layermap_2d for v in row]
-
+ 
         out = json.dumps({
             "success":      True,
             "image_id":     image_id,
@@ -391,16 +361,18 @@ async def segment_layers(
             "layermap_w":   w,
             "n_classes":    13,
             "model_size":   model_size,
-            "image_width":  orig_w,
-            "image_height": orig_h,
+            # Defensive: locals() lookup means a future unpack change degrades to
+            # null dims rather than raising NameError and failing the whole tool.
+            "image_width":  locals().get("orig_w"),
+            "image_height": locals().get("orig_h"),
             "created_at":   datetime.now(timezone.utc).isoformat(),
         })
         logger.info(
             f"segment_layers: {image_id}  model={model_size}  "
-            f"map={h}×{w}  payload={len(out)/1024:.1f}KB"
+            f"map={h}x{w}  payload={len(out)/1024:.1f}KB"
         )
         return out
-
+ 
     except ValueError as e:
         return json.dumps({"success": False, "reason": str(e), "image_id": image_id})
     except Exception as e:
